@@ -83,6 +83,7 @@ class BaseDataset(Dataset):
         """
         # First detect which copy we fall into
         idx = idx % (len(self.annos['action']) // self.chunk_size)
+        
         # and then which chunk
         idx = idx * self.chunk_size
         if self._actions_only:

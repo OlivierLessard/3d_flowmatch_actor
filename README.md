@@ -76,6 +76,8 @@ For HiveFormer:
 > cd RLBench; pip install -r requirements.txt; pip install -e .; cd ..;
 ```
 
+### Install YARR and the RLBench from manigaussian if you want to generate nerf data
+Copy Yarr folder from Manigaussian Repo and install the librairy with: pip install -e . 
 
 ## Model API
 Training:

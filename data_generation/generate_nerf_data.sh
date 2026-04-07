@@ -1,9 +1,10 @@
 #!/bin/bash
 # data_generation/generate_nerf_data.sh
-# Generate NeRF data - exact same as ManiGaussian
 
-DATA_PATH=manigaussian_nerf_raw/
+# Base path for the final dataset
+BASE_DATA_PATH="manigaussian_nerf_raw"
 
+# Define tasks to generate
 tasks=(
     open_drawer
     close_jar
@@ -11,14 +12,34 @@ tasks=(
     stack_blocks
 )
 
-# Run using the RLBench folder from ManiGaussian (it has the nerf generator python script)
-num_tasks=${#tasks[@]}
-for ((i=0; i<$num_tasks; i++)); do
-     xvfb-run -a python RLBench/tools/nerf_dataset_generator.py \  
-          --save_path ${DATA_PATH} \
-          --image_size 128,128 --renderer opengl \
-          --episodes_per_task 20 \
-          --tasks ${tasks[$i]} \
-          --processes 1 \
-          --all_variations True
+# Loop through each task
+for task in "${tasks[@]}"; do
+    echo "------------------------------------------------"
+    echo "Processing Task: $task"
+    echo "------------------------------------------------"
+
+    # 1. Generate Training Data
+    echo "Generating TRAIN data for $task..."
+    xvfb-run -a python RLBench/tools/nerf_dataset_generator.py \
+        --tasks=$task \
+        --save_path="${BASE_DATA_PATH}/train" \
+        --image_size=128,128 \
+        --renderer=opengl \
+        --episodes_per_task=20 \
+        --processes=1 \
+        --all_variations=True
+
+    # 2. Generate Validation/Test Data
+    echo "Generating TEST data for $task..."
+    xvfb-run -a python RLBench/tools/nerf_dataset_generator.py \
+        --tasks=$task \
+        --save_path="${BASE_DATA_PATH}/test" \
+        --image_size=128,128 \
+        --renderer=opengl \
+        --episodes_per_task=25 \
+        --processes=1 \
+        --all_variations=True
+
 done
+
+echo "Data generation complete!"

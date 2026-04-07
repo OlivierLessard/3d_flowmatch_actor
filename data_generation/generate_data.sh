@@ -14,7 +14,7 @@ for ((i=0; i<$num_tasks; i++)); do
      xvfb-run -a python data_generation/generate.py \
           --save_path ${DATA_PATH} \
           --image_size 256,256 --renderer opengl \
-          --episodes_per_task 100 \
+          --episodes_per_task 5 \
           --tasks ${tasks[$i]} --variations ${variation_count} --offset ${variation} \
           --processes 1 --seed ${seed}
 done

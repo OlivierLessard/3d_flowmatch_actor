@@ -42,18 +42,17 @@ def parse_arguments():
 
 
 def all_tasks_main(task, store_trajectory, split):
+    
     # Check if the zarr already exists
     filename = f"{STORE_PATH}/{task}/{split}.zarr"
     if os.path.exists(filename):
         print(f"Zarr file {filename} already exists. Skipping...")
         return None
 
-    cameras = ["wrist", "front"]
-
     # Initialize zarr
+    cameras = ["wrist", "front"]
     compressor = Blosc(cname='lz4', clevel=1, shuffle=Blosc.SHUFFLE)
     with zarr.open_group(filename, mode="w") as zarr_file:
-
         def _create(field, shape, dtype):
             zarr_file.create_dataset(
                 field,
@@ -63,6 +62,7 @@ def all_tasks_main(task, store_trajectory, split):
                 dtype=dtype
             )
 
+        # create datasets in the zarr file
         _create("rgb", (NCAM, 3, IM_SIZE, IM_SIZE), "uint8")
         _create("depth", (NCAM, IM_SIZE, IM_SIZE), "float16")
         _create("proprioception", (3, NHAND, 8), "float32")
@@ -79,18 +79,21 @@ def all_tasks_main(task, store_trajectory, split):
         # Loop through episodes
         variations = os.listdir(f'{ROOT}/{task}/')
         for var_name in variations:
+            # get episodes for this variation
             var_int = var_name[len('variation'):]
             ep_folder = f'{ROOT}/{task}/{var_name}/episodes'
             episodes = sorted([
                 ep for ep in os.listdir(ep_folder) if ep.startswith('episode')]
             )
+            # loop through episodes and store data
             for ep in tqdm(episodes):
+                
                 # Read low-dim file from RLBench
                 ld_file = f"{ep_folder}/{ep}/low_dim_obs.pkl"
                 with open(ld_file, 'rb') as f:
                     demo = pickle.load(f)
 
-                # Keypose discovery
+                # detect Keypose discovery
                 key_frames = keypoint_discovery(demo, bimanual=False)
                 key_frames.insert(0, 0)
 
@@ -107,6 +110,7 @@ def all_tasks_main(task, store_trajectory, split):
                 ])
                 rgb = rgb.transpose(0, 1, 4, 2, 3)
 
+                # Loop through keyposes and store:
                 # Depth (keyframes, cameras, 256, 256)
                 depth_list = []
                 for k in key_frames[:-1]:
@@ -122,6 +126,7 @@ def all_tasks_main(task, store_trajectory, split):
                     depth_list.append(np.stack(cam_d).astype(np.float16))
                 depth = np.stack(depth_list)
 
+                # Loop through keyposes and store:
                 # Proprioception (keyframes, 3, 1, 8)
                 states = np.stack([np.concatenate([
                     demo[k].gripper_pose, [demo[k].gripper_open]

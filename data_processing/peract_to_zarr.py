@@ -49,6 +49,7 @@ def all_tasks_main(split, tasks):
         print(f"Zarr file {filename} already exists. Skipping...")
         return None
 
+    # init dict
     cameras = ["left_shoulder", "right_shoulder", "wrist", "front"]
     task2id = {task: t for t, task in enumerate(tasks)}
 
@@ -64,7 +65,7 @@ def all_tasks_main(split, tasks):
                 compressor=compressor,
                 dtype=dtype
             )
-
+        # add datasets for rgb, point cloud, proprioception, action, task id, and variation id
         _create("rgb", (NCAM, 3, IM_SIZE, IM_SIZE), "uint8")
         _create("pcd", (NCAM, 3, IM_SIZE, IM_SIZE), "float16")
         _create("proprioception", (3, NHAND, 8), "float32")
@@ -72,8 +73,10 @@ def all_tasks_main(split, tasks):
         _create("task_id", (), "uint8")
         _create("variation", (), "uint8")
 
-        # Loop through episodes
+        # Loop through tasks and episodes
         for task in tasks:
+            
+            # get episodes
             print(task)
             episodes = []
             for var in range(0, 199):
@@ -83,22 +86,28 @@ def all_tasks_main(split, tasks):
                 episodes.extend([
                     (ep, var) for ep in sorted(_path.glob("*.dat"))
                 ])
+                
+            # Loop through episodes
             for ep, var in tqdm(episodes):
-                # Read
+                
+                # Read data file
                 with open(ep, "rb") as f:
                     content = pickle.loads(blosc.decompress(f.read()))
+                
+                # get data from content
                 # Map [-1, 1] to [0, 255] uint8
                 rgb = (127.5 * (content[1][:, :, 0] + 1)).astype(np.uint8)
                 # Keep point cloud as it's hard to reverse
                 pcd = content[1][:, :, 1].astype(np.float16)
                 # Store current eef pose as well as two previous ones
-                prop = np.stack([
+                proprioceptive_history = np.stack([
                     to_numpy(tens).astype(np.float32) for tens in content[4]
                 ])
-                prop_1 = np.concatenate([prop[:1], prop[:-1]])
+                prop_1 = np.concatenate([proprioceptive_history[:1], proprioceptive_history[:-1]])
                 prop_2 = np.concatenate([prop_1[:1], prop_1[:-1]])
-                prop = np.concatenate([prop_2, prop_1, prop], 1)
-                prop = prop.reshape(len(prop), 3, NHAND, 8)
+                proprioceptive_history = np.concatenate([prop_2, prop_1, proprioceptive_history], 1)
+                proprioceptive_history = proprioceptive_history.reshape(len(proprioceptive_history), 3, NHAND, 8)
+                
                 # Next keypose (concatenate curr eef to form a "trajectory")
                 actions = np.stack([
                     to_numpy(tens).astype(np.float32) for tens in content[2]
@@ -110,7 +119,7 @@ def all_tasks_main(split, tasks):
                 # write
                 zarr_file['rgb'].append(rgb)
                 zarr_file['pcd'].append(pcd)
-                zarr_file['proprioception'].append(prop)
+                zarr_file['proprioception'].append(proprioceptive_history)
                 zarr_file['action'].append(actions)
                 zarr_file['task_id'].append(tids)
                 zarr_file['variation'].append(_vars)

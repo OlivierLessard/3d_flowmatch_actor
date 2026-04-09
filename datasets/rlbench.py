@@ -28,6 +28,12 @@ PERACT2_TASKS = [
     'bimanual_handover_item_easy',
     'bimanual_take_tray_out_of_oven'
 ]
+PERACT_NERF_TASKS = [
+    "close_jar", "meat_off_grill", "open_drawer", 
+    "insert_onto_square_peg", "push_buttons", "put_item_in_drawer", 
+    "reach_and_drag", "slide_block_to_color_target", "stack_blocks", "sweep_to_dustpan_of_size", 
+    "turn_tap"
+]
 
 
 class RLBenchDataset(BaseDataset):
@@ -186,3 +192,58 @@ class Peract2SingleCamDataset(RLBenchDataset):
     camera_inds = (0,)  # use only front camera
     train_copies = 10
     camera_inds2d = None
+
+
+class PerActNerfDataset(RLBenchDataset):
+    """
+    RLBench dataset under Peract Nerf setup, enhanced with NeRF data.
+    Accommodates the 5 standard cameras and optional NeRF fields.
+    """
+    tasks = PERACT_NERF_TASKS
+    cameras = ("left_shoulder", "right_shoulder", "overhead", "wrist", "front")
+    camera_inds = None      # None means use all cameras
+    train_copies = 10       # copies to avoid indexing issues 
+    camera_inds2d = None
+
+    def _get_nerf_attr(self, idx, key):
+        """Helper to fetch NeRF specific attributes if they exist."""
+        # filter_cam=False because NeRF views are independent of the standard camera_inds
+        return self._get_attr_by_idx(idx, key, filter_cam=False)
+
+    def __getitem__(self, idx):
+        """
+        self.annos contains the standard RLBench fields, plus:
+            nerf_rgb: (N, NCAM_NERF, 3, H, W) uint8
+            nerf_depth: (N, NCAM_NERF, 3, H, W) float16
+            nerf_extrinsics: (N, NCAM_NERF, 4, 4) float16
+            nerf_intrinsics: (N, NCAM_NERF, 3, 3) float16
+        (Note: NeRF fields might only exist in the train split.)
+        """
+        # First detect which copy we fall into
+        idx = idx % (len(self.annos['action']) // self.chunk_size)
+        # and then which chunk
+        idx = idx * self.chunk_size
+        
+        if self._actions_only:
+            return {"action": self._get_action(idx)}
+            
+        data = {
+            "task": self._get_task(idx),  # [str]
+            "instr": self._get_instr(idx),  # [str]
+            "rgb": self._get_rgb(idx),  # tensor(n_cam3d, 3, H, W)
+            "depth": self._get_depth(idx),  # tensor(n_cam3d, H, W)
+            "rgb2d": self._get_rgb2d(idx),  # tensor(n_cam2d, 3, H, W)
+            "proprioception": self._get_proprioception(idx),  # tensor(1, nhist, 8)
+            "action": self._get_action(idx),  # tensor(T, 8)
+            "extrinsics": self._get_extrinsics(idx),  # tensor(n_cam3d, 4, 4)
+            "intrinsics": self._get_intrinsics(idx)  # tensor(n_cam3d, 3, 3)
+        }
+        
+        # Add NeRF data if present (the generation script skips these for 'val')
+        if 'nerf_rgb' in self.annos:
+            data["nerf_rgb"] = self._get_nerf_attr(idx, "nerf_rgb")
+            data["nerf_depth"] = self._get_nerf_attr(idx, "nerf_depth")
+            data["nerf_extrinsics"] = self._get_nerf_attr(idx, "nerf_extrinsics")
+            data["nerf_intrinsics"] = self._get_nerf_attr(idx, "nerf_intrinsics")
+            
+        return data

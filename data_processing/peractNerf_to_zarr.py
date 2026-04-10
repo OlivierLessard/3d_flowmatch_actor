@@ -15,8 +15,10 @@ from data_processing.rlbench_utils import (
     image_to_float_array,
     quat_to_euler_np,
     interpolate_trajectory,
-    euler_to_quat_np
+    euler_to_quat_np,
+    store_instructions
 )
+import numcodecs
 from utils.common_utils import str2bool
 
 STORE_EVERY = 1
@@ -146,7 +148,6 @@ def load_pose_file(p: str):
 def build_action(actions):
     return actions.reshape(len(actions), 1, NHAND, -1)
 
-
 def _interpolate(traj, num_steps):
     # Convert to Euler
     traj = np.concatenate((
@@ -165,6 +166,20 @@ def _interpolate(traj, num_steps):
     return traj
 
 def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
+    """
+    This functions goes through the episodes, extracts keyframes, compute necessary information about the 
+    transition between two consecutive keyframes and stores them in a Zarr file with the following fields.
+    
+    Results after running the main function:
+    **** Finished processing split train. Total episodes stored: 200 Total keyframes stored: 1502
+    **** Finished processing split val. Total episodes stored: 250 Total keyframes stored: 1547
+    
+    :param split: train / val / test    
+    :param tasks: List of task names
+    :param ROOT: Root directory containing the data
+    :param STORE_PATH: Path to store the Zarr files
+    :param store_trajectory: Boolean indicating whether to store the trajectory
+    """
     
     # creat zarr store file
     filename = f"{STORE_PATH}/{split}.zarr"
@@ -179,6 +194,13 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
     with zarr.open_group(filename, mode="w") as zarr_file:
 
         def _create(field, shape, dtype):
+            """
+            Create an array. Arrays are known as "datasets" in HDF5 terminology.
+            
+            :param field: Name of the field to create
+            :param shape: Shape of the array
+            :param dtype: Data type of the array
+            """
             zarr_file.create_dataset(
                 field,
                 shape=(0,) + shape,
@@ -188,27 +210,11 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
             )
 
         # create fields in the zarr file
-        _create("rgb", (NCAM, 3, IM_SIZE, IM_SIZE), "uint8")
-        _create("depth", (NCAM, IM_SIZE, IM_SIZE), "float16")
-        _create("proprioception", (3, NHAND, 8), "float32")
-        _create(
-                "action",
-                (1 if not store_trajectory else INTERP_LEN, NHAND, 8),
-                "float32"
-            ) 
-        _create("extrinsics", (NCAM, 4, 4), "float16")
-        _create("intrinsics", (NCAM, 3, 3), "float16")
-        _create("task_id", (), "uint8")
-        _create("variation", (), "uint8")
-        _create("pcd", (NCAM, 3, IM_SIZE, IM_SIZE), "float16") 
+        create_zarr_arrays(split, store_trajectory, zarr_file, _create)
 
-        # create fields in the zarr file
-        if split == "train":
-            _create("nerf_rgb", (NCAM_NERF, 3, IM_SIZE, IM_SIZE), "uint8")
-            _create("nerf_depth", (NCAM_NERF, 3, IM_SIZE, IM_SIZE), "float16")  # TODO remove the 3 in shape if nerf depth is single-channel
-            _create("nerf_extrinsics", (NCAM_NERF, 4, 4), "float16")
-            _create("nerf_intrinsics", (NCAM_NERF, 3, 3), "float16")
-
+        nb_episodes = 0
+        nb_keyframes = 0
+        
         # loop through tasks and episodes
         for task in tasks:
 
@@ -220,57 +226,50 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
                 print(f"No episodes found for task {task} in {task_path}, skipping")
                 continue
 
+            # loop through episodes and append to the zarr file in each field 
             for episode in tqdm(episodes):
-
-                # load variation
-                with open(episode / "variation_number.pkl", "rb") as f:
-                    variation = pickle.load(f)
-
-                # Read low-dim file from RLBench
-                ld_file = f"{episode}/low_dim_obs.pkl"
-                with open(ld_file, 'rb') as f:
-                    demo = pickle.load(f)
+                # load picklel files
+                descriptions, demo, variation = load_pickle_files(episode)
+                instr_text = descriptions[0]  # TODO - ideally we should store all descriptions and not just the first one, but for now we will just store the first one as the instruction for the whole episode
 
                 # detect Keypose discovery
                 key_frames = keypoint_discovery(demo, bimanual=False)
                 key_frames.insert(0, 0)
+                episode_keyframes_length = len(key_frames) - 1
+                nb_keyframes += episode_keyframes_length
 
                 # Loop through keyposes and store:
                 # RGB (keyframes, cameras, 3, 256, 256)
-                rgb = np.stack([
+                keyframes_rgb = np.stack([
                     np.stack([
-                        np.array(Image.open(
-                            f"{episode}/{cam}_rgb/{k}.png"
-                        ))
-                        for cam in CAMERAS
+                        np.array(Image.open(f"{episode}/{cam}_rgb/{k}.png")) for cam in CAMERAS
                     ])
                     for k in key_frames[:-1]
                 ])
-                rgb = rgb.transpose(0, 1, 4, 2, 3)
+                keyframes_rgb = keyframes_rgb.transpose(0, 1, 4, 2, 3)
                 
-                # Loop through keyposes and store:
+                # Loop through keyposes of the episode and store:
                 # Depth (keyframes, cameras, 256, 256)
                 depth_list = []
                 for k in key_frames[:-1]:
                     cam_d = []
                     for cam in CAMERAS:
-                        depth = image_to_float_array(Image.open(
+                        keyframes_depth = image_to_float_array(Image.open(
                             f"{episode}/{cam}_depth/{k}.png"
                         ), DEPTH_SCALE)
                         near = demo[k].misc[f'{cam}_camera_near']
                         far = demo[k].misc[f'{cam}_camera_far']
-                        depth = near + depth * (far - near)
-                        cam_d.append(depth)
+                        keyframes_depth = near + keyframes_depth * (far - near)
+                        cam_d.append(keyframes_depth)
                     depth_list.append(np.stack(cam_d).astype(np.float16))
-                depth = np.stack(depth_list)
+                keyframes_depth = np.stack(depth_list)
                 
-                # Loop through keyposes and store:
+                # Loop through keyposes of the episode and store:
                 # Proprioception (keyframes, 3, 1, 8)
-                states = np.stack([np.concatenate([
-                    demo[k].gripper_pose, [demo[k].gripper_open]
-                ]) for k in key_frames]).astype(np.float32)
+                keyframes_states = np.stack([np.concatenate([demo[k].gripper_pose, [demo[k].gripper_open]]) for k in key_frames]).astype(np.float32)
+                
                 # Store current eef pose as well as two previous ones
-                prop = states[:-1]
+                prop = keyframes_states[:-1]
                 prop_1 = np.concatenate([prop[:1], prop[:-1]])
                 prop_2 = np.concatenate([prop_1[:1], prop_1[:-1]])
                 prop = np.concatenate([prop_2, prop_1, prop], 1)
@@ -278,19 +277,19 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
                 
                 # Action (keyframes, 1, 1, 8)
                 if not store_trajectory:
-                    actions = states[1:].reshape(len(states[1:]), 1, NHAND, 8)
+                    keyframes_actions = keyframes_states[1:].reshape(len(keyframes_states[1:]), 1, NHAND, 8)
                 else:
-                    states = np.stack([np.concatenate([
+                    keyframes_states = np.stack([np.concatenate([
                         demo[k].gripper_pose, [demo[k].gripper_open]
                     ]) for k in np.arange(len(demo))]).astype(np.float32)
-                    actions = np.ascontiguousarray([
-                        _interpolate(states[prev:next_ + 1], INTERP_LEN)
+                    keyframes_actions = np.ascontiguousarray([
+                        _interpolate(keyframes_states[prev:next_ + 1], INTERP_LEN)
                         for prev, next_ in zip(key_frames[:-1], key_frames[1:])
                     ])
-                    actions = actions.reshape(-1, INTERP_LEN, NHAND, 8)
+                    keyframes_actions = keyframes_actions.reshape(-1, INTERP_LEN, NHAND, 8)
 
                 # Extrinsics (keyframes, cameras, 4, 4)
-                extrinsics = np.stack([
+                keyframes_extrinsics = np.stack([
                     np.stack([
                         demo[k].misc[f'{cam}_camera_extrinsics'].astype(np.float16)
                         for cam in CAMERAS
@@ -299,7 +298,7 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
                 ])
 
                 # Intrinsics (keyframes, cameras, 3, 3)
-                intrinsics = np.stack([
+                keyframes_intrinsics = np.stack([
                     np.stack([
                         demo[k].misc[f'{cam}_camera_intrinsics'].astype(np.float16)
                         for cam in CAMERAS
@@ -308,10 +307,6 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
                 ])
                 
                 task_id = task2id[task]
-                
-                # Variation (keyframes,)
-                with open(episode / 'variation_number.pkl', 'rb') as f:
-                    variation = pickle.load(f)
 
                 # nerf data is currently only stored for train split
                 if split == "train":
@@ -359,23 +354,79 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
                             nerf_extrinsics[idx, cam] = E
                             nerf_intrinsics[idx, cam] = K
 
-                # write
-                zarr_file["rgb"].append(rgb.astype(np.uint8))
-                zarr_file['depth'].append(depth)
+                # for this episode write to each field in the zarr file (automatically appends along the first dimension)
+                zarr_file["rgb"].append(keyframes_rgb.astype(np.uint8))
+                zarr_file['depth'].append(keyframes_depth)
                 zarr_file["proprioception"].append(prop)
-                zarr_file["action"].append(actions)
-                zarr_file['extrinsics'].append(extrinsics)
-                zarr_file['intrinsics'].append(intrinsics)
-                zarr_file['variation'].append(np.array([variation], dtype=np.uint8))
-                zarr_file['task_id'].append(np.array([task_id], dtype=np.uint8))
+                zarr_file["action"].append(keyframes_actions)
+                zarr_file['extrinsics'].append(keyframes_extrinsics)
+                zarr_file['intrinsics'].append(keyframes_intrinsics)
+                repeated_variation = np.array([variation] * episode_keyframes_length, dtype=np.uint8)
+                zarr_file['variation'].append(repeated_variation)
+                repeated_task_id = np.array([task_id] * episode_keyframes_length, dtype=np.uint8)
+                zarr_file['task_id'].append(repeated_task_id)
+                repeated_instr = np.array([instr_text] * episode_keyframes_length, dtype=str)
+                zarr_file['instruction'].append(repeated_instr)
                 
+                # write nerf data
                 if split == "train":
-                    # write nerf data
                     zarr_file["nerf_rgb"].append(nerf_rgb.astype(np.uint8))
                     zarr_file["nerf_depth"].append(nerf_depth.astype(np.float16))
                     zarr_file["nerf_extrinsics"].append(nerf_extrinsics.astype(np.float16))
                     zarr_file["nerf_intrinsics"].append(nerf_intrinsics.astype(np.float16)) 
-                print(f"Stored episode {episode} with {len(key_frames)-1} keyframes and task_id {task_id}")
+                
+                nb_episodes += 1
+
+    print(f"**** Finished processing split {split}. Total episodes stored: {nb_episodes} Total keyframes stored: {nb_keyframes} ")
+
+def load_pickle_files(episode):
+    """
+    Load pickle files for a given episode.
+    variation_number is an integer identifier that specifies which variant/configuration of a robotic manipulation task to execute. 
+    variation_descriptions are task description strings that describe what the specific variation should accomplish
+    
+    :param episode: Description
+    """
+    with open(episode / "variation_number.pkl", "rb") as f:
+        variation = pickle.load(f)
+                    
+    # Load descriptions from the same level
+    with open(episode / 'variation_descriptions.pkl', 'rb') as f:
+        descriptions = pickle.load(f)
+
+                # Read obs file from RLBench
+    ld_file = f"{episode}/low_dim_obs.pkl"
+    with open(ld_file, 'rb') as f:
+        demo = pickle.load(f)
+    return descriptions, demo, variation
+    
+def create_zarr_arrays(split, store_trajectory, zarr_file, _create):
+    _create("rgb", (NCAM, 3, IM_SIZE, IM_SIZE), "uint8")
+    _create("depth", (NCAM, IM_SIZE, IM_SIZE), "float16")
+    _create("proprioception", (3, NHAND, 8), "float32")
+    _create(
+                "action",
+                (1 if not store_trajectory else INTERP_LEN, NHAND, 8),
+                "float32"
+            ) 
+    _create("extrinsics", (NCAM, 4, 4), "float16")
+    _create("intrinsics", (NCAM, 3, 3), "float16")
+    _create("task_id", (), "uint8")
+    _create("variation", (), "uint8")
+    zarr_file.create_dataset(
+            "instruction",
+            shape=(0,),
+            chunks=(STORE_EVERY,),
+            dtype=str
+        )
+
+    # create fields in the zarr file
+    if split == "train":
+        _create("nerf_rgb", (NCAM_NERF, 3, IM_SIZE, IM_SIZE), "uint8")
+        _create("nerf_depth", (NCAM_NERF, 3, IM_SIZE, IM_SIZE), "float16")  # TODO remove the 3 in shape if nerf depth is single-channel
+        _create("nerf_extrinsics", (NCAM_NERF, 4, 4), "float16")
+        _create("nerf_intrinsics", (NCAM_NERF, 3, 3), "float16")
+
 
 if __name__ == "__main__":
     # remove previous zarr files if they exist to avoid appending to old data

@@ -61,9 +61,9 @@ class RLBenchDataset(BaseDataset):
         )
 
     def _get_task(self, idx):
+        print(f"Checking for task data in annotations for index {idx}...")
         return [
-            self.tasks[int(tid)]
-            for tid in self.annos['task_id'][idx:idx + self.chunk_size]
+            self.tasks[int(tid)] for tid in self.annos['task_id'][idx:idx + self.chunk_size]
         ]
 
     def _get_instr(self, idx):
@@ -199,7 +199,7 @@ class PerActNerfDataset(RLBenchDataset):
     RLBench dataset under Peract Nerf setup, enhanced with NeRF data.
     Accommodates the 5 standard cameras and optional NeRF fields.
     """
-    tasks = PERACT_NERF_TASKS
+    tasks = PERACT_TASKS    # tasks ids are based on the original PerAct tasks
     cameras = ("left_shoulder", "right_shoulder", "overhead", "wrist", "front")
     camera_inds = None      # None means use all cameras
     train_copies = 10       # copies to avoid indexing issues 
@@ -210,6 +210,39 @@ class PerActNerfDataset(RLBenchDataset):
         # filter_cam=False because NeRF views are independent of the standard camera_inds
         return self._get_attr_by_idx(idx, key, filter_cam=False)
 
+    def _load_instructions(self, instruction_file):
+        """
+        Override the base method to prevent trying to load an external JSON.
+        We return an empty dict since we fetch from Zarr instead.
+        """
+        return {}
+    
+    def _get_instr(self, idx):
+        """
+        Override to fetch instructions directly from the Zarr cache.
+        """
+        print(f"Fetching instruction for index {idx} directly from Zarr annotations...")
+        # Assume the key in the zarr is either 'instruction' or 'instr'
+        key = 'instruction' if 'instruction' in self.annos else 'instr'
+        
+        if key in self.annos:
+            # We access self.annos directly instead of using _get_attr_by_idx 
+            # to avoid utils.to_tensor() crashing on string data
+            instr = self.annos[key][idx]
+            
+            # Zarr often stores strings as bytes or numpy byte arrays, 
+            # so we decode it back to a standard Python string
+            import numpy as np
+            if isinstance(instr, bytes):
+                return instr.decode('utf-8')
+            elif isinstance(instr, np.ndarray) or hasattr(instr, 'item'):
+                val = instr.item()
+                return val.decode('utf-8') if isinstance(val, bytes) else str(val)
+            return str(instr)
+            
+        # Fallback to base class behavior just in case
+        return super()._get_instr(idx)
+    
     def __getitem__(self, idx):
         """
         self.annos contains the standard RLBench fields, plus:
@@ -219,12 +252,14 @@ class PerActNerfDataset(RLBenchDataset):
             nerf_intrinsics: (N, NCAM_NERF, 3, 3) float16
         (Note: NeRF fields might only exist in the train split.)
         """
+        print(f"Fetching item at index {idx} (adjusted for copies and chunking)")
         # First detect which copy we fall into
         idx = idx % (len(self.annos['action']) // self.chunk_size)
         # and then which chunk
         idx = idx * self.chunk_size
         
         if self._actions_only:
+            print(f"Actions only mode: returning just the action for index {idx}")
             return {"action": self._get_action(idx)}
             
         data = {
@@ -240,10 +275,19 @@ class PerActNerfDataset(RLBenchDataset):
         }
         
         # Add NeRF data if present (the generation script skips these for 'val')
+        print(f"Checking for NeRF data in annotations for index {idx}...")
         if 'nerf_rgb' in self.annos:
             data["nerf_rgb"] = self._get_nerf_attr(idx, "nerf_rgb")
             data["nerf_depth"] = self._get_nerf_attr(idx, "nerf_depth")
             data["nerf_extrinsics"] = self._get_nerf_attr(idx, "nerf_extrinsics")
             data["nerf_intrinsics"] = self._get_nerf_attr(idx, "nerf_intrinsics")
             
-        return data
+        filtered_data = {}
+        for k, v in data.items():
+            if v is None:
+                # Print which key evaluated to None
+                print(f"[DEBUG] Key '{k}' is None and was filtered out.")
+            else:
+                filtered_data[k] = v
+        
+        return filtered_data

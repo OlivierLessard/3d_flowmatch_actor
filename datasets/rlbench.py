@@ -209,39 +209,6 @@ class PerActNerfDataset(RLBenchDataset):
         """Helper to fetch NeRF specific attributes if they exist."""
         # filter_cam=False because NeRF views are independent of the standard camera_inds
         return self._get_attr_by_idx(idx, key, filter_cam=False)
-
-    def _load_instructions(self, instruction_file):
-        """
-        Override the base method to prevent trying to load an external JSON.
-        We return an empty dict since we fetch from Zarr instead.
-        """
-        return {}
-    
-    def _get_instr(self, idx):
-        """
-        Override to fetch instructions directly from the Zarr cache.
-        """
-        print(f"Fetching instruction for index {idx} directly from Zarr annotations...")
-        # Assume the key in the zarr is either 'instruction' or 'instr'
-        key = 'instruction' if 'instruction' in self.annos else 'instr'
-        
-        if key in self.annos:
-            # We access self.annos directly instead of using _get_attr_by_idx 
-            # to avoid utils.to_tensor() crashing on string data
-            instr = self.annos[key][idx]
-            
-            # Zarr often stores strings as bytes or numpy byte arrays, 
-            # so we decode it back to a standard Python string
-            import numpy as np
-            if isinstance(instr, bytes):
-                return instr.decode('utf-8')
-            elif isinstance(instr, np.ndarray) or hasattr(instr, 'item'):
-                val = instr.item()
-                return val.decode('utf-8') if isinstance(val, bytes) else str(val)
-            return str(instr)
-            
-        # Fallback to base class behavior just in case
-        return super()._get_instr(idx)
     
     def __getitem__(self, idx):
         """

@@ -229,8 +229,10 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
             # loop through episodes and append to the zarr file in each field 
             for episode in tqdm(episodes):
                 # load picklel files
-                descriptions, demo, variation = load_pickle_files(episode)
-                instr_text = descriptions[0]  # TODO - ideally we should store all descriptions and not just the first one, but for now we will just store the first one as the instruction for the whole episode
+                random_descriptions, demo, variation_number = load_pickle_files(episode)
+                
+                # Note: instruction are chosen randomly during training, so no need to same them here.
+                # during training, use random.choice(self._instructions[task][str(variation)] to select an instruction given a variation number
 
                 # detect Keypose discovery
                 key_frames = keypoint_discovery(demo, bimanual=False)
@@ -361,13 +363,11 @@ def main(split, tasks, ROOT, STORE_PATH, store_trajectory):
                 zarr_file["action"].append(keyframes_actions)
                 zarr_file['extrinsics'].append(keyframes_extrinsics)
                 zarr_file['intrinsics'].append(keyframes_intrinsics)
-                repeated_variation = np.array([variation] * episode_keyframes_length, dtype=np.uint8)
+                repeated_variation = np.array([variation_number] * episode_keyframes_length, dtype=np.uint8)
                 zarr_file['variation'].append(repeated_variation)
                 repeated_task_id = np.array([task_id] * episode_keyframes_length, dtype=np.uint8)
-                zarr_file['task_id'].append(repeated_task_id)
-                repeated_instr = np.array([instr_text] * episode_keyframes_length, dtype=str)
-                zarr_file['instruction'].append(repeated_instr)
-                
+                zarr_file['task_id'].append(repeated_task_id)  
+                              
                 # write nerf data
                 if split == "train":
                     zarr_file["nerf_rgb"].append(nerf_rgb.astype(np.uint8))
@@ -413,12 +413,6 @@ def create_zarr_arrays(split, store_trajectory, zarr_file, _create):
     _create("intrinsics", (NCAM, 3, 3), "float16")
     _create("task_id", (), "uint8")
     _create("variation", (), "uint8")
-    zarr_file.create_dataset(
-            "instruction",
-            shape=(0,),
-            chunks=(STORE_EVERY,),
-            dtype=str
-        )
 
     # create fields in the zarr file
     if split == "train":
